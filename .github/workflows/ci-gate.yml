@@ -96,7 +96,12 @@ jobs:
   # `gh workflow run ci-gate.yml -R tsarna/ci-shared`
   preflight:
     name: Credential preflight
-    if: github.event_name == 'workflow_dispatch'
+    # `github.event_name` is the CALLER's event, so a repo that dispatches a
+    # workflow which calls this one would look identical to a direct dispatch
+    # of this file -- and would run the preflight instead of its gate. The
+    # required input is the honest discriminator: only a direct dispatch has no
+    # `needs`.
+    if: github.event_name == 'workflow_dispatch' && inputs.needs == ''
     runs-on: ubuntu-latest
     environment: devin
     # A diagnostic, so a singleton: never two at once.
@@ -152,7 +157,10 @@ jobs:
 
   gate:
     name: CI Success
-    if: github.event_name != 'workflow_dispatch'
+    # Everything except a direct dispatch of this file. Written this way round
+    # on purpose: a caller that passes an empty `needs` still reaches the gate
+    # and is failed closed, rather than silently getting no gate at all.
+    if: github.event_name != 'workflow_dispatch' || inputs.needs != ''
     runs-on: ubuntu-latest
     # Deliberately no concurrency group (zizmor reports this at the auditor
     # persona). Any group here is evaluated in the caller's context, so it
