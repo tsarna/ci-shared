@@ -149,12 +149,18 @@ jobs:
           echo "::add-mask::$key"
           echo "ssm key: ok (${#key} characters)"
 
-          org=$(aws ssm get-parameter --name "$SSM_ORG_PARAMETER" \
+          # --with-decryption whatever the parameter's type: it is required for
+          # a SecureString and ignored for a String, so the read does not care
+          # which one it was created as.
+          org=$(aws ssm get-parameter --name "$SSM_ORG_PARAMETER" --with-decryption \
                   --query 'Parameter.Value' --output text)
-          echo "ssm org: ok ($org)"
+          # This repository is public, so these logs are public. The org id is
+          # an identifier rather than a credential, but it is still an account
+          # identifier and does not belong in them.
+          echo "::add-mask::$org"
           case "$org" in
-            org-*) : ;;
-            *) echo "::error::org id should look like org-...; got '$org'"; exit 1 ;;
+            org-*) echo "ssm org: ok (${#org} characters, org- prefix)" ;;
+            *) echo "::error::org id should look like org-...; got ${#org} characters. Is the parameter a SecureString holding something else?"; exit 1 ;;
           esac
 
           code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
@@ -404,8 +410,9 @@ jobs:
           key=$(aws ssm get-parameter --name "$SSM_PARAMETER" --with-decryption \
                   --query 'Parameter.Value' --output text)
           echo "::add-mask::$key"
-          org=$(aws ssm get-parameter --name "$SSM_ORG_PARAMETER" \
+          org=$(aws ssm get-parameter --name "$SSM_ORG_PARAMETER" --with-decryption \
                   --query 'Parameter.Value' --output text)
+          echo "::add-mask::$org"
 
           # Daily budget, counted from Devin's own session list so it holds
           # across repos. A listing failure does not block the handoff: the
