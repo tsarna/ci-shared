@@ -31,6 +31,11 @@ name: CI Gate
 # does -- including failing outright -- can change the CI Success conclusion.
 
 on:
+  # Dispatch runs the preflight job below and nothing else. It exists because
+  # the IAM trust is conditioned on this file's job_workflow_ref: a separate
+  # test workflow would be refused by design, so the only way to prove the
+  # credential path without waiting for a red Renovate PR is from inside here.
+  workflow_dispatch:
   workflow_call:
     inputs:
       needs:
@@ -79,9 +84,74 @@ env:
   SESSION_TAG: renovate-ci
 
 jobs:
+  # Proves OIDC -> STS -> SSM -> Devin end to end, without printing anything
+  # secret: the key's length, and the HTTP status the Devin API answers with.
+  # `gh workflow run ci-gate.yml -R tsarna/ci-shared`
+  preflight:
+    name: Credential preflight
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: devin
+    # A diagnostic, so a singleton: never two at once.
+    concurrency:
+      group: ci-gate-preflight
+      cancel-in-progress: false
+    permissions:
+      id-token: write # the whole point: mint an OIDC token for STS
+    steps:
+      - name: Assume the role, read the key, call the API
+        run: |
+          set -euo pipefail
+
+          idtoken=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                      "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r .value)
+          [ -n "$idtoken" ] && [ "$idtoken" != "null" ] || { echo "::error::no OIDC token"; exit 1; }
+
+          body=$(printf '%s' "$idtoken" | cut -d. -f2 | tr '_-' '/+')
+          pad=$(( (4 - ${#body} % 4) % 4 ))
+          while [ "$pad" -gt 0 ]; do body="${body}="; pad=$((pad - 1)); done
+          echo "Token claims the trust policy matches on:"
+          printf '%s' "$body" | base64 -d 2>/dev/null \
+            | jq '{sub, job_workflow_ref, aud}' || echo "  (could not decode)"
+
+          creds=$(aws sts assume-role-with-web-identity \
+                    --role-arn "$AWS_ROLE_ARN" \
+                    --role-session-name "ci-gate-preflight" \
+                    --web-identity-token "$idtoken" \
+                    --duration-seconds 900 \
+                    --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+                    --output text)
+          AWS_ACCESS_KEY_ID=$(echo "$creds" | cut -f1)
+          AWS_SECRET_ACCESS_KEY=$(echo "$creds" | cut -f2)
+          AWS_SESSION_TOKEN=$(echo "$creds" | cut -f3)
+          export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+          echo "assume-role: ok ($(aws sts get-caller-identity --query Arn --output text))"
+
+          key=$(aws ssm get-parameter --name "$SSM_PARAMETER" --with-decryption \
+                  --query 'Parameter.Value' --output text)
+          echo "::add-mask::$key"
+          echo "ssm: ok (${#key} characters)"
+
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+                   -H "Authorization: Bearer $key" \
+                   "https://api.devin.ai/v1/sessions?limit=1")
+          echo "devin GET /v1/sessions: HTTP $code"
+          case "$code" in
+            200) echo "Preflight passed." ;;
+            401|403) echo "::error::Devin rejected the key (HTTP $code)"; exit 1 ;;
+            404) echo "::error::v1 sessions endpoint not available to this account (HTTP 404)"; exit 1 ;;
+            *) echo "::error::unexpected status $code"; exit 1 ;;
+          esac
+
   gate:
     name: CI Success
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # Deliberately no concurrency group (zizmor reports this at the auditor
+    # persona). Any group here is evaluated in the caller's context, so it
+    # would serialise or cancel the required check across every repo's CI at
+    # once -- a worse outcome than the finding. The job holds no credentials
+    # and writes nothing; it only reads an input it was handed.
     permissions: {}
     outputs:
       # Set before the job fails, so `always()` consumers can still read them.
@@ -175,6 +245,12 @@ jobs:
       && startsWith(github.head_ref, 'renovate/')
     runs-on: ubuntu-latest
     environment: devin
+    # Two CI runs for one PR (a push racing a retry) would otherwise both read
+    # "no marker yet" and both open a session. Serialise per PR; do not cancel,
+    # because a cancelled handoff would leave the marker comment unwritten.
+    concurrency:
+      group: devin-handoff-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     permissions:
       actions: read # read this run's job conclusions for the real job names
       contents: read # read the PR's commit list
