@@ -52,11 +52,19 @@ jobs:
           fi
           echo "passing"
 
-  # Exactly how a real repo calls it.
+  # Exactly how a real repo calls it -- including the permissions, which are
+  # not optional even with handoff disabled. GitHub checks statically that no
+  # job in the called workflow requests more than the caller grants, and fails
+  # the WHOLE RUN at startup if one does. `if:` conditions are not considered.
+  # Granting less here is how this self-test first failed.
   gate:
     if: always()
     needs: [always-ok, conditionally-bad]
-    permissions: {}
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+      id-token: write
     uses: ./.github/workflows/ci-gate.yml
     with:
       needs: ${{ toJSON(needs) }}

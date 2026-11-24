@@ -29,6 +29,13 @@ A reusable workflow cannot see its caller's jobs, but it can be *handed* them:
 without knowing the job names — which is why `build`, `test` and `checks` all
 work unchanged.
 
+> **All four permissions are required, even with `handoff: false`.** GitHub
+> checks statically that no job in a called workflow requests more than the
+> caller grants, and fails the **entire run at startup** if one does — `if:`
+> conditions are not considered, so the skipped handoff job still counts.
+> Granting less does not disable the handoff; it stops the repo's CI from
+> running at all.
+
 Then require only **CI Success** in branch protection. Adding, renaming or
 splitting a job no longer means editing the protection rule.
 
