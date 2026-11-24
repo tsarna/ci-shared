@@ -1,0 +1,93 @@
+name: Gate self-test
+
+# Proves the gate's two behaviours against the real Actions runtime, including
+# the one the whole handoff hangs on: that a job's outputs are still readable
+# after that job has FAILED. If that were not true, `needs.gate.outputs.failure`
+# would be empty in the handoff job, its `if` would never match, and the
+# pipeline would be silently dead while every repo's CI still looked correct.
+#
+#   gh workflow run gate-selftest.yml -R tsarna/ci-shared -f mode=fail
+#   gh workflow run gate-selftest.yml -R tsarna/ci-shared -f mode=pass
+#
+# In `fail` mode the run is red on purpose: `gate` is a required check doing its
+# job. Read `assert`, not the run's colour -- it is green only if the gate
+# failed for the right reason, named the right job, and still handed its outputs
+# downstream.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "fail: one job fails and the gate must catch it. pass: all green."
+        type: choice
+        options: [fail, pass]
+        default: fail
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-selftest
+  cancel-in-progress: false
+
+jobs:
+  always-ok:
+    name: always-ok
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - run: echo "this job always passes"
+
+  conditionally-bad:
+    name: conditionally-bad
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          if [ "$MODE" = "fail" ]; then
+            echo "failing on purpose"
+            exit 1
+          fi
+          echo "passing"
+
+  # Exactly how a real repo calls it.
+  gate:
+    if: always()
+    needs: [always-ok, conditionally-bad]
+    permissions: {}
+    uses: ./.github/workflows/ci-gate.yml
+    with:
+      needs: ${{ toJSON(needs) }}
+      handoff: false
+
+  assert:
+    name: assert
+    if: always()
+    needs: [gate]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - env:
+          MODE: ${{ inputs.mode }}
+          RESULT: ${{ needs.gate.result }}
+          FAILURE: ${{ needs.gate.outputs.failure }}
+          FAILED_JOBS: ${{ needs.gate.outputs.failed_jobs }}
+        run: |
+          set -euo pipefail
+          echo "mode=$MODE gate.result=$RESULT failure='$FAILURE' failed_jobs='$FAILED_JOBS'"
+
+          fail() { echo "::error::$1"; exit 1; }
+
+          if [ "$MODE" = "fail" ]; then
+            [ "$RESULT" = "failure" ] || fail "the gate passed while a job was failing"
+            [ "$FAILURE" = "true" ] || fail "outputs are NOT readable from a failed gate -- the handoff would never fire"
+            [ "$FAILED_JOBS" = "conditionally-bad" ] || fail "failed_jobs should name conditionally-bad, got '$FAILED_JOBS'"
+          else
+            [ "$RESULT" = "success" ] || fail "the gate failed while everything passed"
+            [ "$FAILURE" = "false" ] || fail "failure should be false, got '$FAILURE'"
+            [ -z "$FAILED_JOBS" ] || fail "failed_jobs should be empty, got '$FAILED_JOBS'"
+          fi
+
+          echo "Self-test passed for mode=$MODE"

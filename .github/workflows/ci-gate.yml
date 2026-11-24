@@ -72,6 +72,13 @@ on:
         required: false
         default: 4
         type: number
+    outputs:
+      failure:
+        description: "true when at least one caller job failed"
+        value: ${{ jobs.gate.outputs.failure }}
+      failed_jobs:
+        description: "comma-separated names of the caller jobs that failed"
+        value: ${{ jobs.gate.outputs.failed_jobs }}
 
 permissions:
   contents: read
