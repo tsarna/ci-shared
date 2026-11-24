@@ -97,7 +97,19 @@ workflow file**, called from any repo, can read that parameter.
 | | |
 |---|---|
 | Role | `arn:aws:iam::635166557291:role/gh-devin-handoff` |
-| Parameter | `/awusoh02/apps/devin/api-key` (SecureString, `us-east-2`) |
+| Key | `/awusoh02/apps/devin/api-key` (SecureString, `us-east-2`) |
+| Org id | `/awusoh02/apps/devin/org-id` (String) |
+
+The session API is `POST /v3/organizations/{org_id}/sessions`. A `cog_`
+service-user key authorises **only** the org-scoped v3 routes: every `/v1/*`
+endpoint answers `403 {"detail":"Unauthorized"}` for one, whichever endpoint it
+is, so a 403 there is not a permissions problem to chase. The org id is on the
+**Settings → Devin API** page in app.devin.ai, which is also where service
+users and their keys are created.
+
+The v3 schema has **no `idempotent` field** and **no `branch` field**. So the
+per-head-SHA marker comment is the only thing between a persistently red PR and
+one session per CI run, and the branch is named in the prompt instead.
 
 ### Labels
 
