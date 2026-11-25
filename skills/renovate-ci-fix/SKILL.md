@@ -115,8 +115,16 @@ Then set the label:
 | Not caused by this update (cases 2, 3, 4) | `devin-no-fix` | remove `devin-in-progress` |
 | Caused by the update but you could not fix it | `devin-failed` | remove `devin-in-progress`; say what you tried and where you got stuck |
 
-Use `gh pr comment` and `gh pr edit --add-label/--remove-label`. The labels
-already exist in the repository.
+Use `gh pr comment` for the comment. For labels use the REST endpoint, not
+`gh pr edit --add-label`, which goes through GraphQL and fails on repositories
+where the deprecated Projects (classic) field is still queried:
+
+```sh
+gh api "repos/$REPO/issues/$PR/labels" -f "labels[]=devin-assisted"
+gh api -X DELETE "repos/$REPO/issues/$PR/labels/devin-in-progress"
+```
+
+The labels already exist in the repository.
 
 ## 5. Stay inside the budget
 

@@ -504,7 +504,13 @@ jobs:
               --description "$(echo "$l" | cut -d: -f3-)" 2>/dev/null || true
           done
 
-          gh pr edit "$PR" -R "$REPO" --add-label devin-in-progress || true
+          # REST, not `gh pr edit --add-label`: that goes through GraphQL and
+          # fails outright on repositories where the deprecated Projects
+          # (classic) `projectCards` field is still queried -- the label is not
+          # applied and the step exits non-zero. Observed on the first live
+          # handoff. This endpoint only touches labels.
+          gh api "repos/$REPO/issues/$PR/labels" \
+            -f "labels[]=devin-in-progress" >/dev/null || true
 
           cat > comment.md <<'EOF'
           Renovate CI failure handed to Devin.
