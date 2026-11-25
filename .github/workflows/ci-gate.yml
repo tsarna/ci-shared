@@ -62,6 +62,15 @@ on:
         required: false
         default: "tsarna-renovate[bot]"
         type: string
+      skill:
+        description: >-
+          Which skill under skills/ the session is told to follow. The default
+          is written for code and test failures; a GitOps repo, whose failures
+          are deterministic configuration mismatches that deploy on merge,
+          wants a different one.
+        required: false
+        default: "renovate-ci-fix"
+        type: string
       max_acu:
         description: "Hard ACU ceiling for one session."
         required: false
@@ -428,6 +437,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           MAX_ACU: ${{ inputs.max_acu }}
           MAX_PER_DAY: ${{ inputs.max_sessions_per_day }}
+          SKILL_NAME: ${{ inputs.skill }}
         run: |
           set -euo pipefail
 
@@ -463,8 +473,19 @@ jobs:
           if ! printf '%s' "$self_ref" | grep -qE '^[A-Za-z0-9._/-]{1,100}$'; then
             echo "::error::could not determine this workflow's own ref from the OIDC claims"; exit 1
           fi
-          SKILL_URL="https://raw.githubusercontent.com/tsarna/ci-shared/${self_ref}/skills/renovate-ci-fix/SKILL.md"
-          echo "skill pinned to: $self_ref"
+          # The caller names the skill, so validate it before it becomes part of
+          # a URL: an unchecked value here is a path traversal that redirects
+          # the agent's instructions somewhere else entirely.
+          if ! printf '%s' "$SKILL_NAME" | grep -qE '^[a-z0-9][a-z0-9-]{0,63}$'; then
+            echo "::error::skill name must match ^[a-z0-9][a-z0-9-]{0,63}$"; exit 1
+          fi
+          SKILL_URL="https://raw.githubusercontent.com/tsarna/ci-shared/${self_ref}/skills/${SKILL_NAME}/SKILL.md"
+          echo "skill: $SKILL_NAME, pinned to $self_ref"
+          # A typo'd or renamed skill would otherwise send the session a 404
+          # page to follow, which it would read as its instructions.
+          if [ "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$SKILL_URL")" != "200" ]; then
+            echo "::error::skill '$SKILL_NAME' does not resolve at $self_ref"; exit 1
+          fi
 
           if ! creds=$(aws sts assume-role-with-web-identity \
                  --role-arn "$AWS_ROLE_ARN" \
