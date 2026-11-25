@@ -128,9 +128,22 @@ jobs:
           body=$(printf '%s' "$idtoken" | cut -d. -f2 | tr '_-' '/+')
           pad=$(( (4 - ${#body} % 4) % 4 ))
           while [ "$pad" -gt 0 ]; do body="${body}="; pad=$((pad - 1)); done
+          claims=$(printf '%s' "$body" | base64 -d 2>/dev/null || true)
           echo "Token claims the trust policy matches on:"
-          printf '%s' "$body" | base64 -d 2>/dev/null \
-            | jq '{sub, job_workflow_ref, aud}' || echo "  (could not decode)"
+          printf '%s' "$claims" | jq '{sub, job_workflow_ref, aud}' || echo "  (could not decode)"
+
+          # The handoff job derives the skill URL from this same claim, so that
+          # the agent's instructions come from the revision the caller pinned
+          # rather than from a floating branch. Check that the derivation
+          # resolves to a real file, here, rather than finding out during a
+          # handoff.
+          self_ref=$(printf '%s' "$claims" | jq -r '.job_workflow_ref // ""' | sed 's|.*@||')
+          self_ref=${self_ref#refs/heads/}
+          self_ref=${self_ref#refs/tags/}
+          skill_url="https://raw.githubusercontent.com/tsarna/ci-shared/${self_ref}/skills/renovate-ci-fix/SKILL.md"
+          skill_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$skill_url")
+          echo "skill at ref '$self_ref': HTTP $skill_code"
+          [ "$skill_code" = "200" ] || { echo "::error::the skill does not resolve at this workflow's own ref"; exit 1; }
 
           creds=$(aws sts assume-role-with-web-identity \
                     --role-arn "$AWS_ROLE_ARN" \
