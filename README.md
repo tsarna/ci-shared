@@ -72,15 +72,23 @@ It runs only when all of this holds:
   not a fork, and not reachable by a schedule);
 - the PR is open *now* (re-read live, not from the event payload) and not a
   draft;
-- the author is the Renovate app and **every commit on the branch is the
-  bot's** — a branch a person has started editing is left alone;
+- the author is the Renovate app and every commit on the branch resolves to the
+  bot — a branch a person has started editing is left alone. This is a
+  courtesy, **not a security control**: GitHub resolves a commit's author by
+  email, so anyone who can push with the bot's `…@users.noreply.github.com`
+  address passes it, there is no signature check, and `/pulls/{n}/commits` is
+  capped at 250 entries;
 - the branch matches `^renovate/[A-Za-z0-9._/-]{1,200}$` and the head SHA is 40
   hex characters;
 - no `devin-hold` label;
 - no existing handoff comment for **this head SHA** — Renovate rebases its
   branches, so dedupe is per tree, not per PR. A rebase deserves a fresh look;
   a re-run of the same tree does not;
-- the daily session cap has not been reached.
+- the daily session cap has not been reached. This is counted from Devin's own
+  session list, so it holds across repos, and it **fails closed**: if the list
+  cannot be read or does not parse, no session opens. It is still a
+  time-of-check race — several PRs going red at once all read the same count —
+  so the per-head-SHA marker, not the cap, is the tight bound.
 
 Failing job names come from the Actions API (`checks / checks`, as the UI shows
 them), not from a hand-maintained list, and are character-bounded before they
@@ -96,9 +104,28 @@ with STS (`aws sts assume-role-with-web-identity` — no third-party action in
 the credential path), and reads the Devin API key from SSM. The key's lifetime
 is one shell step.
 
-The IAM trust policy is conditioned on both the environment
-(`repo:tsarna/*:environment:devin`) and `job_workflow_ref` — so **only this
-workflow file**, called from any repo, can read that parameter.
+The IAM trust policy is conditioned on `job_workflow_ref`, so only **this
+workflow file** can read that parameter, from any repo. Be clear about what
+that is and is not:
+
+- The `environment: devin` half carries **no authorization**. The environment
+  has no protection rules, and GitHub auto-creates an unprotected one in any
+  repo that names it. It only shapes the OIDC `sub` claim.
+- The ref is a wildcard, because a commit-pinned caller produces
+  `…ci-gate.yml@<sha>` rather than `@refs/tags/v1`. So the boundary is **any
+  ref of this file**, which means **push access to this repository is
+  equivalent to holding the Devin key** — via the dispatch-only preflight job,
+  which runs with `environment: devin` and `id-token: write`. Protect this
+  repo's default branch accordingly, and treat a collaborator here as a
+  key holder.
+- Fork PRs are kept out by GitHub refusing `id-token: write` to `pull_request`
+  runs from forks. That is load-bearing: without it, a fork PR against a public
+  caller could point `uses:` at a commit from its own unmerged PR ref.
+
+The skill is fetched from the **same revision of this repo that the caller
+pinned**, read out of the OIDC token's own `job_workflow_ref` claim — so
+pinning the workflow pins the agent's instructions with it. Fetching `main`
+would have left the one file the agent is told to obey verbatim mutable.
 
 | | |
 |---|---|
@@ -132,4 +159,10 @@ Created in a repo on first use:
 ### Turning it off
 
 Per PR: add `devin-hold`. Per repo: `with: {handoff: false}`. Everywhere at
-once: revoke the role's policy, or delete the SSM parameter.
+once: revoke the role's policy, or delete the SSM parameter — that is the only
+real kill switch, and it stops new sessions only. **There is no kill switch for
+a session already running**; stop that one in the Devin app.
+
+Note also that the marker comment is not authenticated: anyone who can comment
+on a PR can pre-plant `<!-- devin-ci-fix sha=… -->` and suppress the handoff
+for that tree. That direction is benign, but it is not a guarantee.

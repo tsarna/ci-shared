@@ -94,7 +94,6 @@ env:
   # only the org-scoped v3 routes -- /v1/* answers 403 Unauthorized for them,
   # whatever the endpoint -- so the id is required, not cosmetic.
   SSM_ORG_PARAMETER: /awusoh02/apps/devin/org-id
-  SKILL_URL: https://raw.githubusercontent.com/tsarna/ci-shared/main/skills/renovate-ci-fix/SKILL.md
   SESSION_TAG: renovate-ci
 
 jobs:
@@ -356,8 +355,14 @@ jobs:
           if [ -z "$names" ]; then
             names="$GATE_FAILED_JOBS"
           fi
-          # Job names are repo-authored, but they land in a prompt, so bound them.
-          names=$(printf '%s' "$names" | tr -cd 'A-Za-z0-9 ()/._:,-' | cut -c1-300)
+          # Job names are repo-authored and they land in the prompt of an agent
+          # with push credentials, so they are a free-text channel into it.
+          # Stripping newlines closes the $GITHUB_OUTPUT injection; the length
+          # bound is what limits how much English fits. 300 characters is room
+          # for several sentences, so: 120, and no ':' to build a URL or an
+          # instruction label with. Real names ("checks / checks", "Analyze
+          # (go)") stay intact and recognisable.
+          names=$(printf '%s' "$names" | tr -cd 'A-Za-z0-9 ()/._,-' | cut -c1-120)
 
           echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "failed_jobs=$names" >> "$GITHUB_OUTPUT"
@@ -385,6 +390,33 @@ jobs:
           if [ -z "$idtoken" ] || [ "$idtoken" = "null" ]; then
             echo "::error::no OIDC token -- is id-token: write granted on the calling job?"; exit 1
           fi
+          # This workflow lives in a public repository and several callers are
+          # public, so these logs are public. Nothing below prints the token or
+          # the STS credentials, but one `set -x` or stray `env` would -- and
+          # the result would be a usable 15 minute credential in a public log.
+          echo "::add-mask::$idtoken"
+
+          # The gate's own ref, taken from the token's own job_workflow_ref
+          # claim: `tsarna/ci-shared/.github/workflows/ci-gate.yml@<ref>`. When
+          # a caller pins this workflow by commit, that is the commit -- so the
+          # skill below is fetched from exactly the revision the caller pinned,
+          # and pinning the YAML pins the instructions with it. Reading `main`
+          # would have left the one file the agent is told to obey verbatim
+          # mutable, defeating the pin entirely.
+          claims=$(printf '%s' "$idtoken" | cut -d. -f2 | tr '_-' '/+')
+          pad=$(( (4 - ${#claims} % 4) % 4 ))
+          while [ "$pad" -gt 0 ]; do claims="${claims}="; pad=$((pad - 1)); done
+          claims=$(printf '%s' "$claims" | base64 -d 2>/dev/null || true)
+          self_ref=$(printf '%s' "$claims" | jq -r '.job_workflow_ref // ""' | sed 's|.*@||')
+          self_ref=${self_ref#refs/heads/}
+          self_ref=${self_ref#refs/tags/}
+          # Fail closed: an unresolvable own-ref would otherwise silently fall
+          # back to a floating branch.
+          if ! printf '%s' "$self_ref" | grep -qE '^[A-Za-z0-9._/-]{1,100}$'; then
+            echo "::error::could not determine this workflow's own ref from the OIDC claims"; exit 1
+          fi
+          SKILL_URL="https://raw.githubusercontent.com/tsarna/ci-shared/${self_ref}/skills/renovate-ci-fix/SKILL.md"
+          echo "skill pinned to: $self_ref"
 
           if ! creds=$(aws sts assume-role-with-web-identity \
                  --role-arn "$AWS_ROLE_ARN" \
@@ -394,19 +426,17 @@ jobs:
                  --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
                  --output text 2>&1); then
             echo "::error::assume-role failed: $creds"
-            # Print the claims the trust policy matches on, so a mismatch is
-            # one look rather than a guessing game. Payload only -- the
-            # signature is never printed, and the token expires in minutes.
-            body=$(printf '%s' "$idtoken" | cut -d. -f2 | tr '_-' '/+')
-            pad=$(( (4 - ${#body} % 4) % 4 ))
-            while [ "$pad" -gt 0 ]; do body="${body}="; pad=$((pad - 1)); done
-            printf '%s' "$body" | base64 -d 2>/dev/null \
-              | jq '{sub, job_workflow_ref, repository, environment, aud}' 2>/dev/null || true
+            # The claims the trust policy matches on, so a mismatch is one look
+            # rather than a guessing game. Decoded above; the signature is
+            # never printed and the token expires in minutes.
+            printf '%s' "$claims" | jq '{sub, job_workflow_ref, aud}' 2>/dev/null || true
             exit 1
           fi
           AWS_ACCESS_KEY_ID=$(echo "$creds" | cut -f1)
           AWS_SECRET_ACCESS_KEY=$(echo "$creds" | cut -f2)
           AWS_SESSION_TOKEN=$(echo "$creds" | cut -f3)
+          echo "::add-mask::$AWS_SECRET_ACCESS_KEY"
+          echo "::add-mask::$AWS_SESSION_TOKEN"
           export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 
           key=$(aws ssm get-parameter --name "$SSM_PARAMETER" --with-decryption \
@@ -416,24 +446,37 @@ jobs:
                   --query 'Parameter.Value' --output text)
           echo "::add-mask::$org"
 
-          # Daily budget, counted from Devin's own session list so it holds
-          # across repos. A listing failure does not block the handoff: the
-          # per-head-sha marker already bounds this to one session per tree.
-          today=$(date -u +%Y-%m-%d)
-          used=$(curl -sS --max-time 20 -H "Authorization: Bearer $key" \
-                   "https://api.devin.ai/v3/organizations/$org/sessions?limit=100" 2>/dev/null \
-                 | jq --arg d "$today" --arg t "$SESSION_TAG" \
-                     '[(.sessions? // .)[]? | select((.tags // []) | index($t)) | select((.created_at // "") | startswith($d))] | length' \
-                 2>/dev/null || echo "")
-          case "$used" in ''|*[!0-9]*) used="" ;; esac
-          if [ -n "$used" ]; then
-            echo "renovate-ci sessions today: $used (cap $MAX_PER_DAY)"
-            if [ "$used" -ge "$MAX_PER_DAY" ]; then
-              echo "::warning::daily session cap reached -- not opening another."
-              echo "skipped_budget=true" >> "$GITHUB_OUTPUT"; exit 0
-            fi
-          else
-            echo "::warning::could not read the session list; proceeding on the per-sha marker alone."
+          # Daily budget, counted from Devin's own session list so that it holds
+          # across repos rather than per run.
+          #
+          # The response is PaginatedResponse[SessionResponse]: {"items": [...],
+          # "has_next_page", "end_cursor", "total"} -- not a bare array and not
+          # a `sessions` key -- and `created_at` is an integer epoch, not a
+          # string. An earlier version of this read `.sessions? // .` and
+          # `startswith("YYYY-MM-DD")`, so it matched nothing, errored in jq,
+          # and took the fail-open branch on every single run: a cap that read
+          # as an active control in the README while never once applying.
+          #
+          # Hence fail CLOSED now. A parse failure here means the response
+          # shape moved, and the honest response to "I cannot tell what has
+          # been spent" is to stop rather than to keep spending.
+          midnight=$(date -u -d 'today 00:00:00' +%s 2>/dev/null \
+                     || date -u -v0H -v0M -v0S +%s)
+          if ! listing=$(curl -sS --fail --max-time 20 \
+                           -H "Authorization: Bearer $key" \
+                           "https://api.devin.ai/v3/organizations/$org/sessions?first=200"); then
+            echo "::error::could not read the session list, so the daily cap cannot be enforced -- refusing to open a session"
+            echo "skipped_budget=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if ! used=$(printf '%s' "$listing" | jq -e --argjson since "$midnight" --arg t "$SESSION_TAG" \
+                        '[.items[] | select((.tags // []) | index($t)) | select((.created_at // 0) >= $since)] | length'); then
+            echo "::error::session list did not parse as expected -- refusing to open a session"
+            echo "skipped_budget=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "renovate-ci sessions since 00:00 UTC: $used (cap $MAX_PER_DAY)"
+          if [ "$used" -ge "$MAX_PER_DAY" ]; then
+            echo "::warning::daily session cap reached -- not opening another."
+            echo "skipped_budget=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
 
           # Everything interpolated here has been validated above. The closing
@@ -457,10 +500,17 @@ jobs:
           # No `idempotent` field exists in the v3 schema, so the per-head-SHA
           # marker comment is the only thing standing between a persistently
           # red PR and one session per CI run. Treat it as load-bearing.
+          # `repos` scopes the session. Without it the session's reach is
+          # whatever the Devin GitHub App installation covers org-wide, and the
+          # only thing keeping the agent in the right repository is a sentence
+          # in the skill -- i.e. a request to a model, not a control. The repo
+          # stays named in the prompt as well, so if the field is ever ignored
+          # this is no worse than omitting it.
           jq -n --arg p "$prompt" --arg t "$SESSION_TAG" \
                 --arg title "renovate CI fix: $REPO#$PR" \
+                --arg repo "$REPO" \
                 --argjson acu "$MAX_ACU" \
-            '{prompt: $p, title: $title, tags: [$t],
+            '{prompt: $p, title: $title, tags: [$t], repos: [$repo],
               max_acu_limit: $acu, secret_ids: []}' > payload.json
 
           code=$(curl -sS -o response.json -w '%{http_code}' --max-time 60 \
