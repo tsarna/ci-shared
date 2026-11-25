@@ -19,10 +19,16 @@ makes sense when it didn't. Add it as the last job of a repo's `ci.yml`:
       contents: read
       pull-requests: write      # marker comment + labels
       id-token: write           # OIDC -> AWS -> Devin key in SSM
-    uses: tsarna/ci-shared/.github/workflows/ci-gate.yml@v1
+    uses: tsarna/ci-shared/.github/workflows/ci-gate.yml@<sha> # v1.0.0
     with:
       needs: ${{ toJSON(needs) }}
 ```
+
+Pinned by commit, not by tag. A moving tag would let anyone who can push a tag
+here run code in every calling repo, each of which grants this workflow
+`pull-requests: write` and an OIDC path to the Devin key — and zizmor reports
+it as a HIGH finding. Renovate keeps the hash current from the trailing version
+comment and automerges the bump once the calling repo's own CI is green.
 
 A reusable workflow cannot see its caller's jobs, but it can be *handed* them:
 `toJSON(needs)` is legal in `with:`. So the gate aggregates any repo's results

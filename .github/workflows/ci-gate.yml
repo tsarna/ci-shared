@@ -20,7 +20,9 @@ name: CI Gate
 #       contents: read
 #       pull-requests: write      # marker comment + labels
 #       id-token: write           # OIDC -> AWS -> Devin key in SSM
-#     uses: tsarna/ci-shared/.github/workflows/ci-gate.yml@v1
+#     # Pinned by commit, not tag: a moving tag would let anyone who can push
+#     # one here run code in every calling repo. Renovate keeps it current.
+#     uses: tsarna/ci-shared/.github/workflows/ci-gate.yml@<sha> # v1.0.0
 #     with:
 #       needs: ${{ toJSON(needs) }}
 #
