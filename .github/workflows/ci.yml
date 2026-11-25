@@ -1,0 +1,99 @@
+name: CI
+
+# This repository gates CI in 28 others and holds the only workflow allowed to
+# read the Devin key, and until now it checked nothing about itself: both of
+# its workflows are workflow_call/workflow_dispatch only, so no push or pull
+# request here ran anything at all. Every lint during its construction was run
+# by hand, which is exactly the arrangement that stops being true quietly.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # renovate: datasource=github-releases depName=rhysd/actionlint
+  ACTIONLINT_VERSION: v1.7.12
+  # renovate: datasource=pypi depName=zizmor
+  ZIZMOR_VERSION: 1.33.1
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to a commit rather than the v7 tag, as everything here is.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes.
+          persist-credentials: false
+
+      - name: Install actionlint
+        run: |
+          curl -sSfL "https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION#v}_linux_amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin actionlint
+          actionlint --version
+
+      # Catches the whole class of mistake that broke the self-test during
+      # construction: an expression in a context where its value does not
+      # exist. It also runs shellcheck over every `run:` block.
+      - name: actionlint
+        run: actionlint -no-color .github/workflows/*.yml
+
+      - name: Install zizmor
+        run: |
+          pipx install "zizmor==${ZIZMOR_VERSION}"
+          zizmor --version
+
+      # Default persona deliberately, not --persona=auditor. The gate carries
+      # one known auditor-level finding -- no concurrency group, because any
+      # group there is evaluated in the caller's context and would serialise
+      # the required check across every repo at once -- and a CI job that is
+      # expected to be red is a CI job nobody reads.
+      - name: zizmor
+        run: zizmor --no-progress .github/workflows/*.yml
+
+  # Exercises the gate itself on every change, in the same shape a real caller
+  # uses, so a change that breaks aggregation cannot reach a tag. The red path
+  # is covered separately by gate-selftest.yml, which has to be dispatched
+  # because a deliberately-failing run cannot also be a useful required check.
+  trivial:
+    name: trivial
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - run: echo "a job for the gate to aggregate"
+
+  gate:
+    if: always()
+    needs: [trivial]
+    # All four, even with the handoff disabled: GitHub checks statically that
+    # no job in a called workflow requests more than the caller grants and
+    # fails the whole run at startup if one does, skipped jobs included.
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+      id-token: write
+    # zizmor prefers GitHub's newer `$/` self-repository syntax here, and it
+    # would mean the same thing. But actionlint's latest release (1.7.12, March
+    # 2026) predates that syntax going GA in July and rejects it outright as a
+    # malformed `uses:`, so adopting it would trade one red linter for
+    # another. `./` is correct, universally supported and works on GHES, where
+    # `$/` does not. Flip both call sites and drop these two comments once
+    # actionlint knows the syntax.
+    uses: ./.github/workflows/ci-gate.yml # zizmor: ignore[self-repository]
+    with:
+      needs: ${{ toJSON(needs) }}
+      handoff: false

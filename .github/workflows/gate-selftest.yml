@@ -65,7 +65,9 @@ jobs:
       contents: read
       pull-requests: write
       id-token: write
-    uses: ./.github/workflows/ci-gate.yml
+    # See the note in ci.yml: `$/` would be zizmor's preference and means the
+    # same, but actionlint does not yet parse it.
+    uses: ./.github/workflows/ci-gate.yml # zizmor: ignore[self-repository]
     with:
       needs: ${{ toJSON(needs) }}
       handoff: false
