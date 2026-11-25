@@ -339,14 +339,40 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
 
-          # A branch a person has already started editing is one to leave alone.
-          others=$(gh api "repos/$REPO/pulls/$PR/commits" --paginate \
-                     --jq '[.[] | .author.login // .commit.author.name] | unique | .[]' \
-                   | grep -vxF "$BOT" || true)
-          if [ -n "$others" ]; then
-            echo "Branch carries non-bot commits ($(echo "$others" | tr '\n' ' ')) -- leaving it alone."
+          # A branch a person has already started editing is one to leave
+          # alone. This is also the check that has to stop a human commit from
+          # passing itself off as the bot's, and the author login alone cannot
+          # do that: GitHub resolves authorship by *email*, so
+          # `git config user.email <id>+<slug>[bot]@users.noreply.github.com`
+          # is enough to make .author.login read as the bot, with no signature
+          # check anywhere in sight.
+          #
+          # Requiring a valid GitHub signature as well is what makes it a
+          # control. Renovate commits through the App are signed by GitHub
+          # (verified: true, reason: valid -- confirmed on live PRs), and a
+          # laptop push cannot produce that under the App's identity. Absent or
+          # unverified signatures fail closed, since a missing field reads as
+          # "null" rather than "true".
+          count=$(gh api "repos/$REPO/pulls/$PR" --jq '.commits')
+          case "$count" in ''|*[!0-9]*) count=9999 ;; esac
+          if [ "$count" -gt 250 ]; then
+            # /pulls/{n}/commits returns at most 250 entries even with
+            # --paginate, so past that the branch cannot be fully inspected and
+            # the honest answer is to leave it alone.
+            echo "PR has $count commits, more than can be enumerated -- skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
+
+          gh api "repos/$REPO/pulls/$PR/commits?per_page=100" --paginate \
+            --jq '.[] | "\(.author.login // "-")|\(.commit.verification.verified)"' > commits.txt
+          suspect=$(awk -F'|' -v bot="$BOT" \
+                      'NF && ($1 != bot || $2 != "true") { print $1 "/" $2 }' \
+                      commits.txt | sort -u | tr '\n' ' ')
+          if [ -n "$suspect" ]; then
+            echo "Branch has commits that are not the bot's own signed commits ($suspect) -- leaving it alone."
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "all $count commit(s) are signed and authored by $BOT"
 
           # Opt-out, and idempotency. Renovate rebases its branches, so dedupe
           # on the head sha rather than on the PR: a rebase is a new tree and

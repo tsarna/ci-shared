@@ -72,12 +72,15 @@ It runs only when all of this holds:
   not a fork, and not reachable by a schedule);
 - the PR is open *now* (re-read live, not from the event payload) and not a
   draft;
-- the author is the Renovate app and every commit on the branch resolves to the
-  bot — a branch a person has started editing is left alone. This is a
-  courtesy, **not a security control**: GitHub resolves a commit's author by
-  email, so anyone who can push with the bot's `…@users.noreply.github.com`
-  address passes it, there is no signature check, and `/pulls/{n}/commits` is
-  capped at 250 entries;
+- the author is the Renovate app, and **every commit on the branch is both
+  authored by the bot and carries a valid GitHub signature** — so a branch a
+  person has started editing is left alone. The signature is the part that
+  makes this a control: GitHub resolves authorship by *email*, so
+  `git config user.email <id>+<slug>[bot]@users.noreply.github.com` alone makes
+  the login read as the bot. Renovate's commits through the App are signed by
+  GitHub (`verified: true`, `reason: valid`); a laptop push cannot produce that
+  under the App's identity. A PR with more than 250 commits is skipped, because
+  `/pulls/{n}/commits` cannot enumerate past that;
 - the branch matches `^renovate/[A-Za-z0-9._/-]{1,200}$` and the head SHA is 40
   hex characters;
 - no `devin-hold` label;
