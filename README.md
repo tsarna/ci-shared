@@ -159,7 +159,29 @@ Created in a repo on first use:
 | `devin-failed` | caused by the update, but the session could not fix it |
 | `devin-hold` | never hand this PR to Devin (set by hand) |
 
-### Turning it off
+### This repo is public, so anyone can call the gate
+
+That is fine, and deliberate — the `gate` job is generic and anyone is welcome
+to it. What they cannot do is reach the Devin side, and it is worth being
+precise about why, because one condition carries all of it.
+
+A stranger calling `uses: tsarna/ci-shared/.github/workflows/ci-gate.yml@…`
+produces an OIDC token whose **`job_workflow_ref` matches ours** — they are
+running our file, so that condition cannot distinguish them. The only thing
+that does is the `sub` condition, `repo:tsarna@630146/*` / `repo:tsarna/*`.
+That makes it load-bearing: the two conditions are not redundant belt and
+braces, they each stop a different attacker, and loosening `sub` toward
+`repo:*` would hand the Devin key to anyone who pasted our `uses:` line.
+
+Nothing else is exposed. Reusable workflows run on the **caller's** runners, so
+a stranger's calls cost us no Actions minutes; they cannot create Devin
+sessions without the key; and they cannot write to this repository. The
+handoff and preflight jobs additionally refuse to run outside
+`github.repository_owner == 'tsarna'`, so a stranger gets a clean skip rather
+than a confusing `AccessDenied`, and cannot accidentally build a dependency on
+our Devin pipeline.
+
+## Turning it off
 
 Per PR: add `devin-hold`. Per repo: `with: {handoff: false}`. Everywhere at
 once: revoke the role's policy, or delete the SSM parameter — that is the only
