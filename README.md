@@ -114,13 +114,20 @@ that is and is not:
 - The `environment: devin` half carries **no authorization**. The environment
   has no protection rules, and GitHub auto-creates an unprotected one in any
   repo that names it. It only shapes the OIDC `sub` claim.
-- The ref is a wildcard, because a commit-pinned caller produces
-  `…ci-gate.yml@<sha>` rather than `@refs/tags/v1`. So the boundary is **any
-  ref of this file**, which means **push access to this repository is
-  equivalent to holding the Devin key** — via the dispatch-only preflight job,
-  which runs with `environment: devin` and `id-token: write`. Protect this
-  repo's default branch accordingly, and treat a collaborator here as a
-  key holder.
+- The ref is matched against two patterns only: `@refs/tags/v*`, and a bare
+  40-character commit hash (IAM `StringLike` supports `?`, so forty of them
+  matches a hash exactly). A hash-pinned caller emits
+  `…ci-gate.yml@<40 hex>` with no `refs/` prefix — measured, not assumed.
+  **A branch is deliberately not matched**, so pushing one here and
+  dispatching the preflight on it yields `AccessDenied` rather than the Devin
+  key. Verified both ways.
+- The residue: a token that can push a branch here can usually push a **tag**
+  too, and `v*` tags are matched. A ruleset blocks moving or deleting existing
+  tags, but creating a new one is still possible, so treat push access here as
+  privileged — just no longer as equivalent to the key.
+- Because of that narrowing, the preflight must be dispatched **from a tag**:
+  `gh workflow run ci-gate.yml -R tsarna/ci-shared --ref v1.0.4`. From a branch
+  it will fail at assume-role, which is the point.
 - Fork PRs are kept out by GitHub refusing `id-token: write` to `pull_request`
   runs from forks. That is load-bearing: without it, a fork PR against a public
   caller could point `uses:` at a commit from its own unmerged PR ref.
