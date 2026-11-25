@@ -55,6 +55,7 @@ splitting a job no longer means editing the protection rule.
 | `renovate_bot` | `tsarna-renovate[bot]` | only this author is eligible |
 | `max_acu` | `5` | hard ACU ceiling for one session |
 | `max_sessions_per_day` | `4` | cap across all repos, counted from Devin |
+| `skill` | `renovate-ci-fix` | which skill under `skills/` the session follows |
 
 An empty or missing `needs` fails the gate. A gate that passes because it was
 handed nothing is worse than no gate at all.
@@ -136,6 +137,26 @@ The skill is fetched from the **same revision of this repo that the caller
 pinned**, read out of the OIDC token's own `job_workflow_ref` claim — so
 pinning the workflow pins the agent's instructions with it. Fetching `main`
 would have left the one file the agent is told to obey verbatim mutable.
+
+## Skills
+
+| `skill:` | For |
+|---|---|
+| `renovate-ci-fix` (default) | code and test failures — Go, Python, TypeScript |
+| `renovate-ci-fix-gitops` | a GitOps repository, where failures are deterministic configuration mismatches and anything merged deploys within seconds |
+
+The split is not tidiness. The default skill's triage leans on re-running a
+test to expose a flake and on "fix the code, not the pins"; neither means
+anything when the failing command is `helm template`, which is deterministic,
+and the fix is a values key the chart renamed. The hard rules differ too — one
+forbids `t.Skip`, the other forbids changing a dashboard `uid`, because that
+orphans a Grafana database row no API can remove. A single document covering
+both would be mostly irrelevant to whichever case was live.
+
+The value is validated against `^[a-z0-9][a-z0-9-]{0,63}$` and the resulting
+URL is checked for a 200 before any session opens — an unvalidated name here
+would be a path traversal that redirects the agent's instructions, and a
+typo would hand it a 404 page to follow.
 
 | | |
 |---|---|
