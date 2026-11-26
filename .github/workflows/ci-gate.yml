@@ -103,6 +103,16 @@ env:
   # only the org-scoped v3 routes -- /v1/* answers 403 Unauthorized for them,
   # whatever the endpoint -- so the id is required, not cosmetic.
   SSM_ORG_PARAMETER: /awusoh02/apps/devin/org-id
+  # Optional. While this parameter does not exist the notices are skipped with
+  # a log line, so this ships before the webhook does and starts working when
+  # the webhook arrives -- no second deploy.
+  #
+  # Sessions created through the API cannot be told to report into Slack: the
+  # v3 create request has no channel field, `origin` is output-only, and the
+  # one "default channel" in Devin's docs belongs to the webapp composer's sync
+  # toggle, which an API session never passes through. So the trigger side
+  # reports itself. Devin's own narration is relayed separately.
+  SSM_SLACK_PARAMETER: /awusoh02/apps/slack/automation-webhook
   SESSION_TAG: renovate-ci
 
 jobs:
@@ -529,22 +539,78 @@ jobs:
           # Hence fail CLOSED now. A parse failure here means the response
           # shape moved, and the honest response to "I cannot tell what has
           # been spent" is to stop rather than to keep spending.
+          # Post a notice to Slack, if a webhook is configured. Never fatal: a
+          # Slack outage must not turn into a failed handoff, and the PR comment
+          # remains the authoritative record either way. Defined before the
+          # budget checks because their fail-closed branches are exactly the
+          # ones worth announcing -- a handoff that silently does not happen is
+          # the failure nothing else reports.
+          slack() {
+            hook=$(aws ssm get-parameter --name "$SSM_SLACK_PARAMETER" --with-decryption \
+                     --query 'Parameter.Value' --output text 2>/dev/null) || hook=""
+            if [ -z "$hook" ] || [ "$hook" = "None" ]; then
+              echo "(no Slack webhook configured; skipping notice)"; return 0
+            fi
+            echo "::add-mask::$hook"
+            jq -n --arg t "$1" '{text: $t}' > slack.json
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
+                     -X POST -H 'Content-Type: application/json' \
+                     --data @slack.json "$hook" 2>/dev/null) || code="000"
+            [ "$code" = "200" ] && echo "slack: ok" || echo "::warning::slack notice returned $code"
+            return 0
+          }
+          PR_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR}"
+
+          # notice <emoji> <headline> <detail>. Built with printf rather than a
+          # multi-line shell string: a continuation line at column 0 inside a
+          # YAML block scalar ends the block, which is a parse error rather
+          # than the message you meant.
+          # The backticks are Slack's inline-code markers and are passed as an
+          # argument rather than written into the format string: inside single
+          # quotes shellcheck reads them as an intended command substitution
+          # (SC2016), and it is right to -- a literal backtick in a format
+          # string is worth a second look.
+          notice() {
+            slack "$(printf '%s *%s* — %s\n%s · <%s|pull request>' \
+                       "$1" "$2" "\`$REPO#$PR\`" "$3" "$PR_URL")"
+          }
+
+          # Daily budget, counted from Devin's own session list so that it holds
+          # across repos rather than per run.
+          #
+          # The response is PaginatedResponse[SessionResponse]: {"items": [...],
+          # "has_next_page", "end_cursor", "total"} -- not a bare array and not
+          # a `sessions` key -- and `created_at` is an integer epoch, not a
+          # string. An earlier version of this read `.sessions? // .` and
+          # `startswith("YYYY-MM-DD")`, so it matched nothing, errored in jq,
+          # and took the fail-open branch on every single run: a cap that read
+          # as an active control in the README while never once applying.
+          #
+          # Hence fail CLOSED now. A parse failure here means the response
+          # shape moved, and the honest response to "I cannot tell what has
+          # been spent" is to stop rather than to keep spending.
           midnight=$(date -u -d 'today 00:00:00' +%s 2>/dev/null \
                      || date -u -v0H -v0M -v0S +%s)
           if ! listing=$(curl -sS --fail --max-time 20 \
                            -H "Authorization: Bearer $key" \
                            "https://api.devin.ai/v3/organizations/$org/sessions?first=200"); then
             echo "::error::could not read the session list, so the daily cap cannot be enforced -- refusing to open a session"
+            notice ":warning:" "Handoff declined" "could not read Devin's session list, so the daily cap could not be enforced"
             echo "skipped_budget=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           if ! used=$(printf '%s' "$listing" | jq -e --argjson since "$midnight" --arg t "$SESSION_TAG" \
                         '[.items[] | select((.tags // []) | index($t)) | select((.created_at // 0) >= $since)] | length'); then
             echo "::error::session list did not parse as expected -- refusing to open a session"
+            notice ":warning:" "Handoff declined" "Devin's session list did not parse as expected; the response shape may have moved"
             echo "skipped_budget=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
+
           echo "renovate-ci sessions since 00:00 UTC: $used (cap $MAX_PER_DAY)"
           if [ "$used" -ge "$MAX_PER_DAY" ]; then
             echo "::warning::daily session cap reached -- not opening another."
+            # Worth saying out loud: this is the case where nothing happens and
+            # nothing else would ever tell you.
+            notice ":no_entry:" "Handoff declined" "daily session cap reached ($used/$MAX_PER_DAY)"
             echo "skipped_budget=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
 
@@ -598,6 +664,8 @@ jobs:
           echo "session_id=$sid" >> "$GITHUB_OUTPUT"
           echo "session_url=${surl:-https://app.devin.ai/sessions/$sid}" >> "$GITHUB_OUTPUT"
           echo "Opened $sid"
+          notice ":robot_face:" "Renovate CI handoff" \
+            "failing: \`$FAILED_JOBS\` · skill: \`$SKILL_NAME\` · <${surl:-https://app.devin.ai/sessions/$sid}|session>"
 
       - name: Mark the PR
         if: steps.check.outputs.skip != 'true' && steps.session.outputs.session_id != ''
