@@ -184,6 +184,46 @@ gh api -X DELETE "repos/$REPO/issues/$PR/labels/devin-in-progress"
 
 Remove `devin-in-progress` in every case.
 
+## 9b. Leave a one-line summary for Slack
+
+A Slack notice went out when this session opened. The notice saying how it
+*ended* is posted by CI, triggered by the label you just set — but the sentence
+in it is yours to write. End your PR comment with an HTML comment in exactly
+this form:
+
+```
+<!-- slack: chart renamed logs: to log:; values updated, all three jobs green -->
+```
+
+Because merging this repository deploys it, that sentence should say what
+someone needs to know **before** the merge, not merely that you looked.
+
+One extra case here. §6 outcomes — a real change that must not be made
+mechanically — share the `devin-no-fix` label with "not caused by this update",
+and they are the ones most worth reading. Mark them by starting the line with
+`needs-human:`, which CI renders differently:
+
+```
+<!-- slack: needs-human: the bump moves a PVC storageClassName, which is immutable on an existing volume -->
+```
+
+Rules for that line:
+
+- One sentence, under 240 characters. It is cut off there.
+- No `<` or `>` anywhere in it. They are stripped before posting — they are
+  Slack's link and mention syntax — and a `>` ends the marker early.
+- Never put a diff, a rendered manifest, a log excerpt, an environment
+  variable, a secret's value or a token in it. A `file:line`, or a chart name
+  and version, is the most detail it should carry.
+- One marker, in your final comment only. If several exist in the thread, the
+  last one anywhere wins, which is not necessarily yours.
+- Forgetting it is not fatal: the notice still goes out, using the PR title,
+  and says the summary line was missing.
+
+**Do not try to post to Slack yourself.** A session created through the API has
+no Slack channel access at all — the tool appears to be there and lists zero
+channels — and rediscovering that costs budget that belongs to the fix.
+
 ## 10. Budget
 
 If you are not converging — three failed attempts, or a diff spreading past

@@ -126,6 +126,36 @@ gh api -X DELETE "repos/$REPO/issues/$PR/labels/devin-in-progress"
 
 The labels already exist in the repository.
 
+### Leave a one-line summary for Slack
+
+A Slack notice went out when this session opened. The notice saying how it
+*ended* is posted by CI, triggered by the label you just set — but the sentence
+in it is yours to write. End your PR comment with an HTML comment in exactly
+this form:
+
+```
+<!-- slack: pre-existing race in vinculum-bus eventbus.go:901; the pflag bump is untouched -->
+```
+
+Rules for that line:
+
+- One sentence, under 240 characters. It is cut off there.
+- It is the **finding**, not a status. "Updated the two call sites the release
+  renamed, `-race` still on" tells a reader whether they need to open the PR.
+  "Investigated and commented" does not.
+- No `<` or `>` anywhere in it. They are stripped before posting — they are
+  Slack's link and mention syntax — and a `>` ends the marker early.
+- Never put a diff, a log excerpt, test output, an environment variable or a
+  token in it. A `file:line` reference is the most detail it should carry.
+- One marker, in your final comment only. If several exist in the thread, the
+  last one anywhere wins, which is not necessarily yours.
+- Forgetting it is not fatal: the notice still goes out, using the PR title,
+  and says the summary line was missing.
+
+**Do not try to post to Slack yourself.** A session created through the API has
+no Slack channel access at all — the tool appears to be there and lists zero
+channels — and rediscovering that costs budget that belongs to the fix.
+
 ## 5. Stay inside the budget
 
 The session has a hard ACU ceiling. If you are not converging — three failed

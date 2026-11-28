@@ -138,6 +138,64 @@ pinned**, read out of the OIDC token's own `job_workflow_ref` claim — so
 pinning the workflow pins the agent's instructions with it. Fetching `main`
 would have left the one file the agent is told to obey verbatim mutable.
 
+## Slack notices
+
+Two halves, in two files, posting to the same private `#automation` channel
+through an incoming webhook read from SSM.
+
+**`ci-gate.yml` reports the trigger.** A handoff opened, or declined — cap
+reached, session list unreadable, response shape moved. The declines matter
+most: a handoff that silently does not happen is the failure nothing else
+reports.
+
+**`devin-notify.yml` reports the outcome.** It runs on `pull_request:
+[labeled]`, filtered to the `devin-*` labels on a PR authored by the Renovate
+app. It is a separate workflow file rather than a third job in `ci-gate.yml`
+because a skipped job there would publish a second, skipped `CI Success` check
+run against the same commit — and a required status check is evaluated on the
+newest run bearing that name.
+
+The sentence in that notice is written by the agent and posted by CI. The skill
+tells the session to end its PR comment with
+
+```
+<!-- slack: pre-existing race in vinculum-bus eventbus.go:901; the pflag bump is untouched -->
+```
+
+and `devin-notify` lifts it out. The marker may start with `needs-human:`,
+which the GitOps skill uses for its "real change, but must not be made
+mechanically" outcome — otherwise indistinguishable from `devin-no-fix`.
+No marker is not an error: the notice goes out with the PR title and says the
+summary line was missing.
+
+Why not have Devin post it directly? Because it cannot. Devin's v3 API has no
+session-completion trigger — the automation `event_type` enum has no session
+event at all — and a session created by a **service user** has no Slack access:
+the integration hangs off a linked user profile, which `bot_apk` has none of.
+Measured, not assumed. A probe session reported `listing channels comes back
+empty`, and after the app was invited to the channel, `C0CMJDNJRC0 resolves to
+a channel that exists, but this session can't use it`. The `notifications.slack`
+field on the create request is accepted and silently ignored (so is
+`zzz_definitely_not_a_field` — that is how the ignoring was established).
+
+Doing it this way also keeps the webhook inside our own CI instead of handing it
+to the vendor, costs no ACU, and cannot be skipped by a session that ran out of
+budget or died.
+
+Everything lifted out of a PR comment is downstream of repository content,
+dependency changelogs and test output, so it is treated as text: `<`, `>` and
+`@` are stripped — which removes every Slack link and mention construct
+(`<@U…>`, `<!channel>`, `<url|text>`) — non-printables are dropped, and the
+result is cut to 240 characters.
+
+Both files assume the same `gh-devin-handoff` role, so the IAM trust policy
+names **both** workflow files in its `job_workflow_ref` condition. Adding a
+third file here means adding it there too, or it fails at assume-role.
+
+Each half is independently optional: while the SSM parameter is absent, both
+log a line and carry on. Slack is a convenience, the PR comment is the record,
+and a Slack outage must never turn into a red check or a lost handoff.
+
 ## Skills
 
 | `skill:` | For |
