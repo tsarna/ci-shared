@@ -1,0 +1,193 @@
+name: Devin outcome notice
+
+# The other half of ci-gate.yml's Slack reporting.
+#
+# ci-gate announces a handoff when it OPENS a session. Nothing announces how it
+# ended, because nothing can: Devin's v3 API has no "session finished" trigger
+# (the automation `event_type` enum has no session event at all), and a session
+# created by a service user cannot post to Slack itself -- Slack access hangs
+# off a *linked user profile*, and `bot_apk` has none, so it sees zero channels
+# even after the app is invited to one. Measured, not assumed: a probe session
+# reported "listing channels comes back empty", and after the invite,
+# "C0CMJDNJRC0 resolves to a channel that exists, but this session can't use
+# it".
+#
+# So the agent writes the sentence and CI posts it. The skill tells Devin to end
+# its PR comment with
+#
+#     <!-- slack: one line saying what was actually found -->
+#
+# and to set one of the devin-* labels. The label is the trigger, the marker is
+# the content. This way the webhook never leaves our own CI, the notice cannot
+# be silently skipped by a session that died or ran out of budget, and it costs
+# no ACU.
+#
+# Labels added by the gate itself use GITHUB_TOKEN, and events raised by
+# GITHUB_TOKEN deliberately do not start workflow runs -- which is why
+# `devin-in-progress` never reaches this file even before the filter below.
+
+on:
+  workflow_call:
+    inputs:
+      label:
+        description: "The label that was just added (github.event.label.name)."
+        required: true
+        type: string
+      renovate_bot:
+        description: >-
+          Only PRs authored by this login notify. A devin-* label on a
+          hand-written PR is a human talking to a human, not an automation
+          outcome, and does not belong in the channel.
+        required: false
+        default: "tsarna-renovate[bot]"
+        type: string
+
+permissions: {}
+
+env:
+  AWS_REGION: us-east-2
+  AWS_ROLE_ARN: arn:aws:iam::635166557291:role/gh-devin-handoff
+  # Optional, exactly as in ci-gate: while the parameter is absent the notice
+  # is skipped with a log line rather than failing the job.
+  SSM_SLACK_PARAMETER: /awusoh02/apps/slack/automation-webhook
+
+jobs:
+  notify:
+    name: Slack notice
+    # `devin-in-progress` is excluded explicitly as well as structurally: if the
+    # gate ever marks a PR with something other than GITHUB_TOKEN, this file
+    # should not start narrating progress into an outcomes channel.
+    if: >-
+      github.repository_owner == 'tsarna'
+      && github.event_name == 'pull_request'
+      && startsWith(inputs.label, 'devin-')
+      && inputs.label != 'devin-in-progress'
+      && github.event.pull_request.user.login == inputs.renovate_bot
+    runs-on: ubuntu-latest
+    # Required by the role's trust policy, which matches on
+    # `repo:tsarna/*:environment:devin` -- and on job_workflow_ref, which is why
+    # this lives in its own file rather than as a third job in ci-gate.yml:
+    # a skipped job in that file would publish a second, skipped "CI Success"
+    # check run against the same commit, and a required check is evaluated on
+    # the newest run with that name.
+    environment: devin
+    permissions:
+      id-token: write # mint the OIDC token for STS
+      issues: read # PR comments are issue comments
+      pull-requests: read
+    # One notice per PR at a time. Two labels applied in quick succession would
+    # otherwise race to read the same comment thread.
+    concurrency:
+      group: devin-notify-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      - name: Post the outcome
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          LABEL: ${{ inputs.label }}
+        run: |
+          set -euo pipefail
+
+          PR_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR}"
+
+          # --- the sentence -------------------------------------------------
+          # Flattened first: the marker is written by an agent and may well wrap
+          # across lines in the comment body.
+          all=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[].body' \
+                | tr '\r\n\t' '   ')
+          raw=$(printf '%s' "$all" | grep -o '<!-- *slack:[^>]*-->' | tail -1 \
+                | sed -e 's/^<!-- *slack: *//' -e 's/ *-->$//') || raw=""
+
+          # A GitOps session can conclude that a change is real but must not be
+          # made mechanically. That is the one outcome most worth reading, and
+          # it shares the devin-no-fix label with "not caused by this update",
+          # so the marker carries the distinction.
+          needs_human=false
+          case "$raw" in
+            needs-human:*) needs_human=true; raw=${raw#needs-human:} ;;
+          esac
+
+          # Everything above came out of a PR comment, which is downstream of
+          # repository content, dependency changelogs and test output. Treat it
+          # as text, never as Slack markup: dropping < and > removes every link
+          # and mention construct Slack has (<@U…>, <!channel>, <url|text>),
+          # and the length cap keeps a runaway comment from becoming a wall.
+          clean=$(printf '%s' "$raw" | tr -d '<>@' | tr -cd '[:print:]' \
+                  | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//' | cut -c1-240)
+
+          if [ -z "$clean" ]; then
+            # No marker: the label still tells the truth, so report that much
+            # rather than nothing, and say the detail is missing.
+            clean=$(printf '%s' "$PR_TITLE" | tr -d '<>@' | tr -cd '[:print:]' \
+                    | tr -s ' ' | cut -c1-200)
+            clean="${clean} _(no summary line in the PR comment)_"
+          fi
+
+          # --- the headline -------------------------------------------------
+          case "$LABEL" in
+            devin-assisted) emoji=":white_check_mark:"; head="Renovate CI fixed" ;;
+            devin-no-fix)
+              if [ "$needs_human" = true ]; then
+                emoji=":raised_hand:"; head="Renovate CI — needs a human"
+              else
+                emoji=":mag:"; head="Renovate CI — not this update"
+              fi ;;
+            devin-failed)  emoji=":x:"; head="Renovate CI — could not fix" ;;
+            *) echo "unrecognised label '$LABEL'; nothing to say"; exit 0 ;;
+          esac
+
+          # --- credentials --------------------------------------------------
+          idtoken=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                      "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r .value)
+          [ -n "$idtoken" ] && [ "$idtoken" != "null" ] || { echo "::error::no OIDC token"; exit 1; }
+
+          if ! creds=$(aws sts assume-role-with-web-identity \
+                 --role-arn "$AWS_ROLE_ARN" \
+                 --role-session-name "devin-notify-${PR}" \
+                 --web-identity-token "$idtoken" \
+                 --duration-seconds 900 \
+                 --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+                 --output text 2>&1); then
+            echo "::error::assume-role failed: $creds"
+            body=$(printf '%s' "$idtoken" | cut -d. -f2 | tr '_-' '/+')
+            case $(( ${#body} % 4 )) in 2) body="$body==";; 3) body="$body=";; esac
+            printf '%s' "$body" | base64 -d 2>/dev/null \
+              | jq '{sub, job_workflow_ref, aud}' 2>/dev/null || true
+            exit 1
+          fi
+          AWS_ACCESS_KEY_ID=$(echo "$creds" | cut -f1)
+          AWS_SECRET_ACCESS_KEY=$(echo "$creds" | cut -f2)
+          AWS_SESSION_TOKEN=$(echo "$creds" | cut -f3)
+          echo "::add-mask::$AWS_SECRET_ACCESS_KEY"
+          echo "::add-mask::$AWS_SESSION_TOKEN"
+          export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+
+          # --- post ---------------------------------------------------------
+          hook=$(aws ssm get-parameter --name "$SSM_SLACK_PARAMETER" --with-decryption \
+                   --query 'Parameter.Value' --output text 2>/dev/null) || hook=""
+          if [ -z "$hook" ] || [ "$hook" = "None" ]; then
+            echo "(no Slack webhook configured; skipping notice)"; exit 0
+          fi
+          echo "::add-mask::$hook"
+
+          # printf rather than a multi-line shell string: a continuation line at
+          # column 0 inside a YAML block scalar ends the block. The backticks are
+          # Slack's inline-code markers, passed as an argument so that they are
+          # not read as a command substitution inside single quotes (SC2016).
+          text=$(printf '%s *%s* — %s\n%s · <%s|pull request>' \
+                   "$emoji" "$head" "\`$REPO#$PR\`" "$clean" "$PR_URL")
+          jq -n --arg t "$text" '{text: $t}' > slack.json
+
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
+                   -X POST -H 'Content-Type: application/json' \
+                   --data @slack.json "$hook" 2>/dev/null) || code="000"
+          # Never fatal. The PR comment is the record; Slack is a convenience,
+          # and a Slack outage must not show up as a red check on the PR.
+          if [ "$code" = "200" ]; then
+            echo "slack: ok"
+          else
+            echo "::warning::slack notice returned $code"
+          fi
